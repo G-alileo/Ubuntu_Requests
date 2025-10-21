@@ -28,33 +28,51 @@ def save_hash(hash_value: str):
 
 def fetch_image(url: str, existing_hashes: set):
     try:
-        head = requests.head(url, timeout=10)
+        head = requests.head(url, timeout=10, allow_redirects=True)
         content_type = head.headers.get("Content-Type", "")
 
-        # 1. Validate MIME type
+        # Validate MIME type
         if not content_type.startswith("image/"):
             print(f"✗ {url} rejected - Not a valid image (MIME: {content_type})")
             return False
 
-        # 2. Validate file size (if content-length present)
+        # Validate file size (if content-length present)
         content_length = head.headers.get("Content-Length")
         if content_length and int(content_length) > MAX_FILE_SIZE:
             print(f"✗ {url} rejected - File too large")
             return False
 
-        # Download after checks
+        # Other useful header checks
+        content_disposition = head.headers.get("Content-Disposition", "")
+        etag = head.headers.get("ETag")
+        last_modified = head.headers.get("Last-Modified")
+        cache_control = head.headers.get("Cache-Control", "")
+
+        if "no-store" in cache_control.lower():
+            print(f"✗ {url} rejected - Server forbids saving this image (Cache-Control: no-store)")
+            return False
+
+        if not etag and not last_modified:
+            print(f"⚠ Warning: No ETag/Last-Modified, file may be unstable or CDN-served")
+
+        # Download after safe header validation
         response = requests.get(url, timeout=10)
         response.raise_for_status()
 
-        # 3. Hash image before saving to detect duplicates
+        # compute hash BEFORE saving to detect duplicates
         file_hash = compute_hash(response.content)
         if file_hash in existing_hashes:
             print(f"⚠ {url} skipped - Duplicate image detected")
             return False
 
-        # 4. Extract filename safely
-        parsed_url = urlparse(url)
-        filename = os.path.basename(parsed_url.path) or f"image_{abs(hash(url))}.jpg"
+        # Extract filename (prefer Content-Disposition over URL)
+        filename = None
+        if "filename=" in content_disposition:
+            filename = content_disposition.split("filename=")[-1].strip('"; ')
+
+        if not filename:
+            parsed_url = urlparse(url)
+            filename = os.path.basename(parsed_url.path) or f"image_{abs(hash(url))}.jpg"
 
         # Ensure proper extension
         if not filename.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
@@ -62,16 +80,16 @@ def fetch_image(url: str, existing_hashes: set):
 
         filepath = os.path.join("Fetched_Images", filename)
 
-        # 5. Validate size against actual bytes downloaded
+        # Validate actual downloaded size
         if len(response.content) > MAX_FILE_SIZE:
             print(f"✗ {url} rejected - Downloaded file too large")
             return False
 
-        # Save file
+        #  Save file
         with open(filepath, 'wb') as f:
             f.write(response.content)
 
-        # Save hash to DB
+        # Save hash to db
         save_hash(file_hash)
         existing_hashes.add(file_hash)
 
@@ -86,14 +104,14 @@ def fetch_image(url: str, existing_hashes: set):
 def main():
     print("Welcome to the Ubuntu Image Fetcher")
     print("A tool for mindfully collecting images from the web\n")
-    
+
     # Get multiple URLs from user
     urls = input("Enter image URLs (separate by comma or space):\n").split()
 
     # Create directory if not exists
     os.makedirs("Fetched_Images", exist_ok=True)
 
-    # Load existing hash DB
+    # Load existing hashes
     existing_hashes = load_hash_db()
 
     print("\n--- Starting downloads ---\n")
